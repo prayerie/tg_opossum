@@ -1,0 +1,113 @@
+use crate::models::History;
+use crate::models::{Banned, InsertBanned, InsertHist};
+use crate::schema;
+
+use diesel::pg::PgConnection;
+use diesel::{prelude::*, dsl};
+use dotenvy::dotenv;
+use std::env;
+use std::time::SystemTime;
+
+pub fn establish_connection() -> PgConnection {
+    dotenv().ok();
+
+    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    PgConnection::establish(&database_url)
+        .unwrap_or_else(|_| panic!("Error connecting to {}", database_url))
+}
+
+pub fn get_delta_for_chat(the_chat_id: i64) -> u32 {
+    use self::schema::history::dsl::*;
+
+    let connection = &mut establish_connection();
+    let results = history
+        .filter(chat_id.eq(the_chat_id))
+        .order(datetime.desc())
+        .limit(1)
+        .load::<History>(connection)
+        .expect("Error loading hist");
+
+    if results.len() == 0 {
+        return 300
+    }
+    let then = results[0].datetime;
+    let now = SystemTime::now();
+
+    // 300 is a panic number of secs as not to interfere.
+    match now.duration_since(then) {
+        Ok(dur) => {
+            return dur.as_secs().try_into().unwrap_or(300)
+        } ,
+        Err(_) => return 300
+    }
+
+}
+
+pub fn get_banned() -> Vec<i32> {
+    use self::schema::banned_imgs::dsl::*;
+    let connection = &mut establish_connection();
+    let mut banned_names: Vec<i32> = vec![];
+    return match banned_imgs.load::<Banned>(connection) {
+        Ok(banned_imgs_vec) => {
+            for i in banned_imgs_vec {
+                banned_names.push(i.name);
+            }
+            banned_names
+        },
+        Err(e) => vec![],
+    };
+}
+
+pub fn put_banned(img_name: i32) -> bool {
+    use crate::schema::banned_imgs;
+    let connection = &mut establish_connection();
+
+    let new_item = InsertBanned { name: &img_name };
+
+    return match diesel::insert_into(banned_imgs::table)
+        .values(&new_item)
+        .get_result::<Banned>(connection)
+    {
+        Ok(_) => true,
+        Err(e) => {
+            log::error!("Failed to insert banned image item! `{}`", e);
+            false
+        }
+    };
+}
+
+pub fn insert_hist(
+    chat_id: i64,
+    chat_username: Option<&str>,
+    hiss: bool,
+    image: i32,
+    by_command: bool,
+    chat_private: bool,
+) -> bool {
+    use crate::schema::history;
+    let connection = &mut establish_connection();
+    let chat_usn = match chat_username {
+        Some(s) => s,
+        None => "@",
+    };
+    let new_post = InsertHist {
+        chat_id: &chat_id,
+        chat_username: chat_usn,
+        hiss: &hiss,
+        image: &image,
+        by_command: &by_command,
+        chat_private: &chat_private,
+        datetime: &dsl::now
+    };
+
+    return match diesel::insert_into(history::table)
+        .values(&new_post)
+        .get_result::<History>(connection)
+    {
+        Ok(_) => true,
+        Err(e) => {
+            log::error!("Failed to insert history item! `{}`", e);
+            false
+        }
+    };
+}
